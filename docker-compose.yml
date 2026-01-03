@@ -38,9 +38,14 @@ services:
       - temporal
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: golang:1.23
+    restart: always
+    volumes:
+      - ./:/app
+      - ./docker/app-entrypoint.sh:/usr/local/bin/app-entrypoint.sh:ro
+    entrypoint:
+      - /bin/bash
+      - /usr/local/bin/app-entrypoint.sh
     environment:
       DATABASE_URL: postgres://temporal:temporal@postgres:5432/app?sslmode=disable
       TEMPORAL_HOSTPORT: temporal:7233
@@ -55,4 +60,3 @@ services:
 
 volumes:
   pgdata:
-
