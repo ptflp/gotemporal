@@ -1,12 +1,14 @@
+// Package httpapi provides the HTTP API for orders, backed by Temporal workflows.
 package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
@@ -16,27 +18,30 @@ import (
 
 type Server struct {
 	httpServer *http.Server
-	handler    *handler
+	api        huma.API
 }
 
 func NewServer(addr string, svc *orders.Service) *Server {
-	h := &handler{svc: svc}
+	router := chi.NewRouter()
+	router.Use(middleware.RequestID)
+	router.Use(middleware.Recoverer)
 
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.Recoverer)
-	r.Post("/orders", h.createOrder)
-	r.Get("/orders/{id}", h.getOrder)
-	registerDocsRoutes(r)
+	cfg := huma.DefaultConfig("Order Service API", "1.0.0")
+	cfg.Info.Description = "Minimal REST API to create orders and read their status. Orchestration is handled by Temporal; statuses are persisted in Postgres."
+	// Drop default schema link transformer to avoid `$schema` fields in responses/docs.
+	cfg.CreateHooks = nil
+	api := humachi.New(router, cfg)
+
+	registerRoutes(api, svc)
 
 	return &Server{
 		httpServer: &http.Server{
 			Addr:         addr,
-			Handler:      r,
+			Handler:      router,
 			ReadTimeout:  15 * time.Second,
 			WriteTimeout: 15 * time.Second,
 		},
-		handler: h,
+		api: api,
 	}
 }
 
@@ -48,13 +53,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-type handler struct {
-	svc *orders.Service
-}
-
 type createOrderRequest struct {
 	Amount     int    `json:"amount"`
 	CustomerID string `json:"customer_id"`
+}
+
+type createOrderInput struct {
+	Body createOrderRequest `required:"true"`
+}
+
+type createOrderOutput struct {
+	Body orderResponse
+}
+
+type getOrderInput struct {
+	ID uuid.UUID `path:"id"`
+}
+
+type getOrderOutput struct {
+	Body orderResponse
 }
 
 type orderResponse struct {
@@ -67,50 +84,32 @@ type orderResponse struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-func (h *handler) createOrder(w http.ResponseWriter, r *http.Request) {
-	var req createOrderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-
-	order, err := h.svc.Create(r.Context(), orders.CreateOrderRequest{
-		Amount:     req.Amount,
-		CustomerID: req.CustomerID,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, toResponse(order))
-}
-
-func (h *handler) getOrder(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	orderID, err := uuid.Parse(idStr)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-
-	order, err := h.svc.Get(r.Context(), orderID)
-	if err != nil {
-		if errors.Is(err, orders.ErrOrderNotFound) {
-			http.NotFound(w, r)
-			return
+func registerRoutes(api huma.API, svc *orders.Service) {
+	huma.Post(api, "/orders", func(ctx context.Context, input *createOrderInput) (*createOrderOutput, error) {
+		order, err := svc.Create(ctx, orders.CreateOrderRequest{
+			Amount:     input.Body.Amount,
+			CustomerID: input.Body.CustomerID,
+		})
+		if err != nil {
+			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
-	writeJSON(w, http.StatusOK, toResponse(order))
-}
+		return &createOrderOutput{Body: toResponse(order)}, nil
+	}, huma.OperationTags("orders"), func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusCreated
+	})
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	huma.Get(api, "/orders/{id}", func(ctx context.Context, input *getOrderInput) (*getOrderOutput, error) {
+		order, err := svc.Get(ctx, input.ID)
+		if err != nil {
+			if errors.Is(err, orders.ErrOrderNotFound) {
+				return nil, huma.NewError(http.StatusNotFound, "order not found")
+			}
+			return nil, huma.NewError(http.StatusInternalServerError, err.Error())
+		}
+
+		return &getOrderOutput{Body: toResponse(order)}, nil
+	}, huma.OperationTags("orders"))
 }
 
 func toResponse(o *orders.Order) orderResponse {

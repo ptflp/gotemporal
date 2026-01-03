@@ -1,98 +1,96 @@
-openapi: 3.1.0
+basePath: /
+definitions:
+  internal_httpapi.createOrderRequest:
+    properties:
+      amount:
+        type: integer
+      customer_id:
+        type: string
+    type: object
+  internal_httpapi.orderResponse:
+    properties:
+      amount:
+        type: integer
+      created_at:
+        type: string
+      customer_id:
+        type: string
+      id:
+        type: string
+      reason:
+        type: string
+      status:
+        type: string
+      updated_at:
+        type: string
+    type: object
+host: localhost:3000
 info:
+  contact: {}
+  description: Minimal REST API to create orders and read their status. Orchestration
+    is handled by Temporal; statuses are persisted in Postgres.
   title: Order Service API
-  version: 1.0.0
-  description: |
-    Minimal REST API to create orders and read their status.
-    Orchestration is handled by Temporal; statuses are persisted in Postgres.
-servers:
-  - url: http://localhost:3000
+  version: "1.0"
 paths:
   /orders:
     post:
-      summary: Create order and start processing workflow
-      requestBody:
+      consumes:
+      - application/json
+      parameters:
+      - description: Order payload
+        in: body
+        name: request
         required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateOrderRequest'
-            example:
-              amount: 1000
-              customer_id: cust-1
+        schema:
+          $ref: '#/definitions/internal_httpapi.createOrderRequest'
+      produces:
+      - application/json
       responses:
         "201":
           description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Order'
+          schema:
+            $ref: '#/definitions/internal_httpapi.orderResponse'
         "400":
-          description: Bad request
-        "500":
-          description: Internal error
-  /orders/{id}:
-    get:
-      summary: Get order status
-      parameters:
-        - in: path
-          name: id
-          required: true
+          description: invalid json
           schema:
             type: string
-            format: uuid
+        "500":
+          description: internal error
+          schema:
+            type: string
+      summary: Create order and start processing workflow
+      tags:
+      - orders
+  /orders/{id}:
+    get:
+      consumes:
+      - application/json
+      parameters:
+      - description: Order ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
       responses:
         "200":
           description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Order'
+          schema:
+            $ref: '#/definitions/internal_httpapi.orderResponse'
+        "400":
+          description: invalid id
+          schema:
+            type: string
         "404":
-          description: Not found
+          description: not found
+          schema:
+            type: string
         "500":
-          description: Internal error
-components:
-  schemas:
-    Status:
-      type: string
-      enum:
-        - created
-        - payment_pending
-        - payment_confirmed
-        - shipping
-        - completed
-        - failed
-        - cancelled
-    CreateOrderRequest:
-      type: object
-      properties:
-        amount:
-          type: integer
-          format: int32
-        customer_id:
-          type: string
-      required: [amount, customer_id]
-    Order:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-        status:
-          $ref: '#/components/schemas/Status'
-        reason:
-          type: string
-          nullable: true
-        amount:
-          type: integer
-          format: int32
-        customer_id:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
+          description: internal error
+          schema:
+            type: string
+      summary: Get order status
+      tags:
+      - orders
+swagger: "2.0"
