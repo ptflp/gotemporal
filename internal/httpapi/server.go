@@ -27,6 +27,7 @@ func NewServer(addr string, svc *orders.Service) *Server {
 	r.Use(middleware.Recoverer)
 	r.Post("/orders", h.createOrder)
 	r.Get("/orders/{id}", h.getOrder)
+	registerDocsRoutes(r)
 
 	return &Server{
 		httpServer: &http.Server{
