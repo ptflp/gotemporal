@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
+	_ "github.com/lib/pq"
 	"github.com/ptflp/gotemporal/ent"
 	"github.com/ptflp/gotemporal/internal/config"
 	"github.com/ptflp/gotemporal/internal/httpapi"
