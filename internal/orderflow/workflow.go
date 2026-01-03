@@ -1,3 +1,4 @@
+// Package orderflow contains the Temporal workflow for order processing.
 package orderflow
 
 import (
@@ -33,33 +34,21 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) error {
 		return err
 	}
 
-	if err := workflow.ExecuteActivity(ctx, SetPaymentPendingActivityName, input.OrderID).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, SetPaymentPendingActivityName, input.OrderID, input.PaymentDelay).Get(ctx, nil); err != nil {
 		return err
 	}
 
-	if input.PaymentDelay > 0 {
-		if err := workflow.Sleep(ctx, input.PaymentDelay); err != nil {
-			return err
-		}
-	}
-
-	if err := workflow.ExecuteActivity(ctx, ConfirmPaymentActivityName, input.OrderID).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, ConfirmPaymentActivityName, input.OrderID, input.PaymentDelay).Get(ctx, nil); err != nil {
 		_ = failOrder(err.Error())
 		return err
 	}
 
-	if err := workflow.ExecuteActivity(ctx, StartShippingActivityName, input.OrderID).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, StartShippingActivityName, input.OrderID, input.ShippingDelay).Get(ctx, nil); err != nil {
 		_ = failOrder(err.Error())
 		return err
 	}
 
-	if input.ShippingDelay > 0 {
-		if err := workflow.Sleep(ctx, input.ShippingDelay); err != nil {
-			return err
-		}
-	}
-
-	if err := workflow.ExecuteActivity(ctx, CompleteOrderActivityName, input.OrderID).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, CompleteOrderActivityName, input.OrderID, input.ShippingDelay).Get(ctx, nil); err != nil {
 		_ = failOrder(err.Error())
 		return err
 	}

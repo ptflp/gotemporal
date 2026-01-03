@@ -1,7 +1,9 @@
+// Package orderflow defines workflow activities for order processing.
 package orderflow
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -39,19 +41,31 @@ func (a *Activities) CreateOrder(ctx context.Context, orderID uuid.UUID, amount 
 	return a.CreateOrderFn(ctx, orderID, amount, customerID)
 }
 
-func (a *Activities) SetPaymentPending(ctx context.Context, orderID uuid.UUID) error {
+func (a *Activities) SetPaymentPending(ctx context.Context, orderID uuid.UUID, delay time.Duration) error {
+	if err := sleepActivity(ctx, delay); err != nil {
+		return err
+	}
 	return a.updateStatus(ctx, orderID, orderstatus.StatusPaymentPending, nil)
 }
 
-func (a *Activities) ConfirmPayment(ctx context.Context, orderID uuid.UUID) error {
+func (a *Activities) ConfirmPayment(ctx context.Context, orderID uuid.UUID, delay time.Duration) error {
+	if err := sleepActivity(ctx, delay); err != nil {
+		return err
+	}
 	return a.updateStatus(ctx, orderID, orderstatus.StatusPaymentConfirmed, nil)
 }
 
-func (a *Activities) StartShipping(ctx context.Context, orderID uuid.UUID) error {
+func (a *Activities) StartShipping(ctx context.Context, orderID uuid.UUID, delay time.Duration) error {
+	if err := sleepActivity(ctx, delay); err != nil {
+		return err
+	}
 	return a.updateStatus(ctx, orderID, orderstatus.StatusShipping, nil)
 }
 
-func (a *Activities) CompleteOrder(ctx context.Context, orderID uuid.UUID) error {
+func (a *Activities) CompleteOrder(ctx context.Context, orderID uuid.UUID, delay time.Duration) error {
+	if err := sleepActivity(ctx, delay); err != nil {
+		return err
+	}
 	return a.updateStatus(ctx, orderID, orderstatus.StatusCompleted, nil)
 }
 
@@ -64,4 +78,19 @@ func (a *Activities) updateStatus(ctx context.Context, orderID uuid.UUID, status
 		return nil
 	}
 	return a.UpdateStatusFn(ctx, orderID, status, reason)
+}
+
+func sleepActivity(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
