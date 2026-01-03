@@ -21,9 +21,10 @@ func NewRepository(client *ent.Client) *Repository {
 	return &Repository{client: client}
 }
 
-func (r *Repository) Create(ctx context.Context, req CreateOrderRequest) (*Order, error) {
+func (r *Repository) Create(ctx context.Context, id uuid.UUID, req CreateOrderRequest) (*Order, error) {
 	created, err := r.client.Order.
 		Create().
+		SetID(id).
 		SetAmount(req.Amount).
 		SetCustomerID(req.CustomerID).
 		SetStatus(order.Status(orderstatus.StatusCreated)).
@@ -32,6 +33,14 @@ func (r *Repository) Create(ctx context.Context, req CreateOrderRequest) (*Order
 		return nil, err
 	}
 	return mapModel(created), nil
+}
+
+func (r *Repository) CreateOrder(ctx context.Context, id uuid.UUID, amount int, customerID string) error {
+	_, err := r.Create(ctx, id, CreateOrderRequest{
+		Amount:     amount,
+		CustomerID: customerID,
+	})
+	return err
 }
 
 func (r *Repository) UpdateStatus(ctx context.Context, id uuid.UUID, status orderstatus.Status, reason *string) error {

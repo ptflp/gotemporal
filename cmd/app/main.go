@@ -52,11 +52,16 @@ func main() {
 	defer temporalClient.Close()
 
 	repo := orders.NewRepository(entClient)
-	activities := orderflow.NewActivities(repo.UpdateStatus)
+	activities := orderflow.NewActivities(repo.CreateOrder, repo.UpdateStatus)
 
 	w := worker.New(temporalClient, cfg.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(orderflow.OrderWorkflow)
-	w.RegisterActivityWithOptions(activities.UpdateStatus, activity.RegisterOptions{Name: orderflow.UpdateStatusActivityName})
+	w.RegisterActivityWithOptions(activities.CreateOrder, activity.RegisterOptions{Name: orderflow.CreateOrderActivityName})
+	w.RegisterActivityWithOptions(activities.SetPaymentPending, activity.RegisterOptions{Name: orderflow.SetPaymentPendingActivityName})
+	w.RegisterActivityWithOptions(activities.ConfirmPayment, activity.RegisterOptions{Name: orderflow.ConfirmPaymentActivityName})
+	w.RegisterActivityWithOptions(activities.StartShipping, activity.RegisterOptions{Name: orderflow.StartShippingActivityName})
+	w.RegisterActivityWithOptions(activities.CompleteOrder, activity.RegisterOptions{Name: orderflow.CompleteOrderActivityName})
+	w.RegisterActivityWithOptions(activities.FailOrder, activity.RegisterOptions{Name: orderflow.FailOrderActivityName})
 
 	service := orders.NewService(repo, temporalClient, cfg.TaskQueue, cfg.PaymentDelay, cfg.ShippingDelay)
 	server := httpapi.NewServer(cfg.HTTPAddr, service)

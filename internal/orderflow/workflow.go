@@ -6,12 +6,12 @@ import (
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
-
-	"github.com/ptflp/gotemporal/internal/orderstatus"
 )
 
 type OrderWorkflowInput struct {
 	OrderID       uuid.UUID
+	Amount        int
+	CustomerID    string
 	PaymentDelay  time.Duration
 	ShippingDelay time.Duration
 }
@@ -25,11 +25,15 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) error {
 	}
 	ctx = workflow.WithActivityOptions(ctx, ao)
 
-	update := func(status orderstatus.Status, reason *string) error {
-		return workflow.ExecuteActivity(ctx, UpdateStatusActivityName, input.OrderID, status, reason).Get(ctx, nil)
+	failOrder := func(reason string) error {
+		return workflow.ExecuteActivity(ctx, FailOrderActivityName, input.OrderID, reason).Get(ctx, nil)
 	}
 
-	if err := update(orderstatus.StatusPaymentPending, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, CreateOrderActivityName, input.OrderID, input.Amount, input.CustomerID).Get(ctx, nil); err != nil {
+		return err
+	}
+
+	if err := workflow.ExecuteActivity(ctx, SetPaymentPendingActivityName, input.OrderID).Get(ctx, nil); err != nil {
 		return err
 	}
 
@@ -39,11 +43,13 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) error {
 		}
 	}
 
-	if err := update(orderstatus.StatusPaymentConfirmed, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, ConfirmPaymentActivityName, input.OrderID).Get(ctx, nil); err != nil {
+		_ = failOrder(err.Error())
 		return err
 	}
 
-	if err := update(orderstatus.StatusShipping, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, StartShippingActivityName, input.OrderID).Get(ctx, nil); err != nil {
+		_ = failOrder(err.Error())
 		return err
 	}
 
@@ -53,7 +59,8 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) error {
 		}
 	}
 
-	if err := update(orderstatus.StatusCompleted, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, CompleteOrderActivityName, input.OrderID).Get(ctx, nil); err != nil {
+		_ = failOrder(err.Error())
 		return err
 	}
 
