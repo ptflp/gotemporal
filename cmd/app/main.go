@@ -6,13 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+	"go.uber.org/fx"
+	"go.uber.org/fx/fxevent"
 
 	_ "github.com/lib/pq"
 	"github.com/ptflp/gotemporal/ent"
@@ -23,37 +23,93 @@ import (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	app := fx.New(
+		fx.WithLogger(func(log *slog.Logger) fxevent.Logger {
+			return &fxevent.SlogLogger{Logger: log}
+		}),
+		fx.Provide(
+			config.Load,
+			newLogger,
+			newEntClient,
+			newTemporalClient,
+			newActivities,
+			newWorker,
+			newRepository,
+			newOrdersService,
+			newHTTPServer,
+		),
+		fx.Invoke(
+			startHTTPServer,
+			runWorker,
+		),
+	)
 
-	cfg := config.Load()
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	app.Run()
 
-	entClient, err := ent.Open("postgres", cfg.DatabaseURL)
+	if err := app.Err(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func newLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
+func newEntClient(lc fx.Lifecycle, cfg config.Config, logger *slog.Logger) (*ent.Client, error) {
+	client, err := ent.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("failed to open database", "err", err)
-		os.Exit(1)
-	}
-	defer entClient.Close()
-
-	if err := entClient.Schema.Create(ctx); err != nil {
-		logger.Error("failed to run migrations", "err", err)
-		os.Exit(1)
+		return nil, err
 	}
 
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			migrationCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			if err := client.Schema.Create(migrationCtx); err != nil {
+				logger.Error("failed to run migrations", "err", err)
+				return err
+			}
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			client.Close()
+			return nil
+		},
+	})
+
+	return client, nil
+}
+
+func newTemporalClient(lc fx.Lifecycle, cfg config.Config, logger *slog.Logger) (client.Client, error) {
 	temporalClient, err := client.Dial(client.Options{
 		HostPort:  cfg.TemporalHostPort,
 		Namespace: cfg.TemporalNamespace,
 	})
 	if err != nil {
 		logger.Error("failed to connect to temporal", "err", err)
-		os.Exit(1)
+		return nil, err
 	}
-	defer temporalClient.Close()
 
-	repo := orders.NewRepository(entClient)
-	activities := orderflow.NewActivities(repo.CreateOrder, repo.UpdateStatus)
+	lc.Append(fx.Hook{
+		OnStop: func(ctx context.Context) error {
+			temporalClient.Close()
+			return nil
+		},
+	})
 
+	return temporalClient, nil
+}
+
+func newActivities(repo *orders.Repository) *orderflow.Activities {
+	return orderflow.NewActivities(repo.CreateOrder, repo.UpdateStatus)
+}
+
+func newRepository(client *ent.Client) *orders.Repository {
+	return orders.NewRepository(client)
+}
+
+func newWorker(cfg config.Config, temporalClient client.Client, activities *orderflow.Activities) worker.Worker {
 	w := worker.New(temporalClient, cfg.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(orderflow.OrderWorkflow)
 	w.RegisterActivityWithOptions(activities.CreateOrder, activity.RegisterOptions{Name: orderflow.CreateOrderActivityName})
@@ -63,35 +119,66 @@ func main() {
 	w.RegisterActivityWithOptions(activities.CompleteOrder, activity.RegisterOptions{Name: orderflow.CompleteOrderActivityName})
 	w.RegisterActivityWithOptions(activities.FailOrder, activity.RegisterOptions{Name: orderflow.FailOrderActivityName})
 
-	service := orders.NewService(repo, temporalClient, cfg.TaskQueue, cfg.PaymentDelay, cfg.ShippingDelay)
-	server := httpapi.NewServer(cfg.HTTPAddr, service)
+	return w
+}
 
-	errCh := make(chan error, 2)
+func newOrdersService(repo *orders.Repository, temporalClient client.Client, cfg config.Config) *orders.Service {
+	return orders.NewService(repo, temporalClient, cfg.TaskQueue, cfg.PaymentDelay, cfg.ShippingDelay)
+}
 
-	go func() {
-		if err := w.Run(worker.InterruptCh()); err != nil {
-			errCh <- err
-		}
-	}()
+func newHTTPServer(cfg config.Config, svc *orders.Service) *httpapi.Server {
+	return httpapi.NewServer(cfg.HTTPAddr, svc)
+}
 
-	go func() {
-		if err := server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
+type workerRunnerParams struct {
+	fx.In
 
-	logger.Info("app started", "http", cfg.HTTPAddr, "taskQueue", cfg.TaskQueue)
+	Worker     worker.Worker
+	Shutdowner fx.Shutdowner
+	Logger     *slog.Logger
+}
 
-	select {
-	case <-ctx.Done():
-		logger.Info("shutting down")
-	case err := <-errCh:
-		logger.Error("service error", "err", err)
-	}
+func runWorker(lc fx.Lifecycle, params workerRunnerParams) {
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			go func() {
+				if err := params.Worker.Run(worker.InterruptCh()); err != nil {
+					params.Logger.Error("worker exited with error", "err", err)
+					_ = params.Shutdowner.Shutdown()
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			params.Worker.Stop()
+			return nil
+		},
+	})
+}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+type serverParams struct {
+	fx.In
 
-	_ = server.Shutdown(shutdownCtx)
-	w.Stop()
+	Server     *httpapi.Server
+	Shutdowner fx.Shutdowner
+	Logger     *slog.Logger
+}
+
+func startHTTPServer(lc fx.Lifecycle, params serverParams) {
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			go func() {
+				if err := params.Server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					params.Logger.Error("http server exited with error", "err", err)
+					_ = params.Shutdowner.Shutdown()
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return params.Server.Shutdown(shutdownCtx)
+		},
+	})
 }
